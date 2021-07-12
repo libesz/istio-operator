@@ -93,6 +93,12 @@ var v2_1ChartOrder = [][]string{
 	{ThreeScaleChart, WASMExtensionsChart},
 }
 
+var v2_1ExternalCharts = []string {
+	"DiscoveryChart",
+}
+
+var externalProfileFound bool
+
 type versionStrategyV2_1 struct {
 	version
 	conversionImpl v2xConversionStrategy
@@ -167,6 +173,10 @@ func (v *versionStrategyV2_1) GetChartInstallOrder() [][]string {
 	return v2_1ChartOrder
 }
 
+func (v *versionStrategyV2_1) GetExternalCharts() []string {
+	return v2_1ExternalCharts
+}
+
 func (v *versionStrategyV2_1) isExternalProfileActive(profiles []string) bool {
 	for _, profile := range profiles {
 		if profile == "external" {
@@ -174,6 +184,10 @@ func (v *versionStrategyV2_1) isExternalProfileActive(profiles []string) bool {
 		}
 	}
 	return false
+}
+
+func (v *versionStrategyV2_1) IsExternalProfileActive() bool {
+	return externalProfileFound
 }
 
 // TODO: consider consolidating this with 2.0 rendering logic
@@ -211,7 +225,7 @@ func (v *versionStrategyV2_1) Render(ctx context.Context, cr *common.ControllerR
 		return nil, err
 	}
 
-	externalProfileFound := v.isExternalProfileActive(spec.Profiles)
+	externalProfileFound = v.isExternalProfileActive(spec.Profiles)
 
 	// In case of split control and data plane, the CNI installation is disabled for the control plane side.
 	// However, this field controls the injector for the data plane, which uses CNI (and so not using real init container, only validator)

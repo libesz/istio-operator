@@ -94,6 +94,7 @@ type Version interface {
 	GetUserTemplatesDir() string
 	GetDefaultTemplatesDir() string
 	GetCNINetworkName() string
+	IsExternalProfileActive() bool
 }
 
 // ValidationStrategy is an interface used by the validating webhook for validating SMCP resources.
@@ -135,6 +136,10 @@ func GetSupportedVersions() []Version {
 }
 
 type version int
+
+func (v version) IsExternalProfileActive() bool {
+	return false
+}
 
 var _ Version = version(0)
 
@@ -199,6 +204,11 @@ func (v *nilVersionStrategy) ValidateUpgrade(ctx context.Context, cl client.Clie
 func (v *nilVersionStrategy) GetChartInstallOrder() [][]string {
 	return nil
 }
+
+func (v *nilVersionStrategy) IsExternalProfileActive() bool {
+	return false
+}
+
 func (v *nilVersionStrategy) Render(ctx context.Context, cr *common.ControllerResources, cniConfig cni.Config, smcp *v2.ServiceMeshControlPlane) (map[string][]manifest.Manifest, error) {
 	return nil, fmt.Errorf("nil version does not support rendering")
 }
@@ -239,6 +249,10 @@ func (v *invalidVersionStrategy) ValidateUpgrade(ctx context.Context, cl client.
 }
 func (v *invalidVersionStrategy) GetChartInstallOrder() [][]string {
 	return nil
+}
+
+func (v *invalidVersionStrategy) IsExternalProfileActive() bool {
+	return false
 }
 
 func (v *invalidVersionStrategy) Render(ctx context.Context, cr *common.ControllerResources, cniConfig cni.Config, smcp *v2.ServiceMeshControlPlane) (map[string][]manifest.Manifest, error) {

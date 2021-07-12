@@ -332,6 +332,10 @@ func (v *versionStrategyV1_1) GetChartInstallOrder() [][]string {
 	return v1_1ChartOrder
 }
 
+func (v *versionStrategyV1_1) IsExternalProfileActive() bool {
+	return false
+}
+
 func (v *versionStrategyV1_1) Render(ctx context.Context, cr *common.ControllerResources, cniConfig cni.Config, smcp *v2.ServiceMeshControlPlane) (map[string][]manifest.Manifest, error) {
 	return v.renderImpl.render(ctx, v.version, cr, cniConfig, smcp)
 }

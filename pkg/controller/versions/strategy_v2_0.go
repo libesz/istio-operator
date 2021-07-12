@@ -167,6 +167,10 @@ func (v *versionStrategyV2_0) GetChartInstallOrder() [][]string {
 	return v2_0ChartOrder
 }
 
+func (v *versionStrategyV2_0) IsExternalProfileActive() bool {
+	return false
+}
+
 func (v *versionStrategyV2_0) Render(ctx context.Context, cr *common.ControllerResources, cniConfig cni.Config, smcp *v2.ServiceMeshControlPlane) (map[string][]manifest.Manifest, error) {
 	log := common.LogFromContext(ctx)
 	//Generate the spec
