@@ -22,7 +22,7 @@ type config struct {
 // OLM is intermediate struct for serialization
 type olm struct {
 	Images      images `json:"relatedImage,omitempty"`
-	CNIDisabled bool   `json:"cniEnabled,omitempty"`
+	CNIDisabled bool   `json:"cniDisabled,omitempty"`
 }
 
 // Images for various versions
