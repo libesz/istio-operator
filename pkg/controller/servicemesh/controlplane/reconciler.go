@@ -34,14 +34,15 @@ import (
 
 type controlPlaneInstanceReconciler struct {
 	common.ControllerResources
-	Instance          *v2.ServiceMeshControlPlane
-	Status            *v2.ControlPlaneStatus
-	ownerRefs         []metav1.OwnerReference
-	meshGeneration    string
-	chartVersion      string
-	renderings        map[string][]manifest.Manifest
-	waitForComponents sets.String
-	cniConfig         cni.Config
+	Instance                        *v2.ServiceMeshControlPlane
+	Status                          *v2.ControlPlaneStatus
+	controlPlaneSecondaryKubeClient client.Client
+	ownerRefs                       []metav1.OwnerReference
+	meshGeneration                  string
+	chartVersion                    string
+	renderings                      map[string][]manifest.Manifest
+	waitForComponents               sets.String
+	cniConfig                       cni.Config
 }
 
 // ensure controlPlaneInstanceReconciler implements ControlPlaneInstanceReconciler
@@ -64,17 +65,19 @@ const (
 	eventReasonReady                   = "Ready"
 )
 
-func NewControlPlaneInstanceReconciler(controllerResources common.ControllerResources, newInstance *v2.ServiceMeshControlPlane, cniConfig cni.Config) ControlPlaneInstanceReconciler {
+func NewControlPlaneInstanceReconciler(controllerResources common.ControllerResources, cpCl client.Client, newInstance *v2.ServiceMeshControlPlane, cniConfig cni.Config) ControlPlaneInstanceReconciler {
 	return &controlPlaneInstanceReconciler{
-		ControllerResources: controllerResources,
-		Instance:            newInstance,
-		Status:              newInstance.Status.DeepCopy(),
-		cniConfig:           cniConfig,
+		ControllerResources:             controllerResources,
+		Instance:                        newInstance,
+		Status:                          newInstance.Status.DeepCopy(),
+		cniConfig:                       cniConfig,
+		controlPlaneSecondaryKubeClient: cpCl,
 	}
 }
 
 func (r *controlPlaneInstanceReconciler) Reconcile(ctx context.Context) (result reconcile.Result, err error) {
 	log := common.LogFromContext(ctx)
+
 	log.Info("Reconciling ServiceMeshControlPlane", "Status", r.Instance.Status.StatusType)
 	if r.Status.GetCondition(status.ConditionTypeReconciled).Status != status.ConditionStatusFalse {
 		r.initializeReconcileStatus()
@@ -224,7 +227,7 @@ func (r *controlPlaneInstanceReconciler) Reconcile(ctx context.Context) (result 
 	} else if r.waitForComponents.Len() > 0 {
 		// if we've already begun reconciling, make sure we weren't waiting for
 		// the last component to become ready
-		readyComponents, _, readinessErr := r.calculateComponentReadiness(ctx)
+		readyComponents, _, readinessErr := r.calculateComponentReadiness(ctx, r.controlPlaneSecondaryKubeClient)
 		if readinessErr != nil {
 			// error calculating readiness
 			reconciliationReason = status.ConditionReasonProbeError
@@ -257,12 +260,17 @@ func (r *controlPlaneInstanceReconciler) Reconcile(ctx context.Context) (result 
 		for _, chart := range charts {
 			component := componentFromChartName(chart)
 			var hasReadiness bool
-			hasReadiness, err = r.processComponentManifests(ctx, chart)
+
+			isExternalProfileActive := version.Strategy().IsExternalProfileActive()
+
+			hasReadiness, err = r.processComponentManifests(ctx, chart, isExternalProfileActive)
+
 			if err != nil {
 				reconciliationReason = status.ConditionReasonReconcileError
 				reconciliationMessage = fmt.Sprintf("Error processing component %s: %v", component, err)
 				return
 			}
+
 			if hasReadiness {
 				r.waitForComponents.Insert(component)
 			} else {
@@ -281,7 +289,7 @@ func (r *controlPlaneInstanceReconciler) Reconcile(ctx context.Context) (result 
 			// resource. Otherwise we'd get a stale status that suggests it's ready when it's really not.
 			hacks.ReduceLikelihoodOfRepeatedReconciliation(ctx)
 
-			readyComponents, _, readyErr := r.calculateComponentReadiness(ctx)
+			readyComponents, _, readyErr := r.calculateComponentReadiness(ctx, r.controlPlaneSecondaryKubeClient)
 			if readyErr != nil {
 				reconciliationReason, reconciliationMessage, err = r.pauseReconciliation(ctx)
 				return
@@ -301,7 +309,7 @@ func (r *controlPlaneInstanceReconciler) Reconcile(ctx context.Context) (result 
 	reconciliationMessage = "Pruning obsolete resources"
 	r.EventRecorder.Event(r.Instance, corev1.EventTypeNormal, eventReasonPruning, reconciliationMessage)
 	log.Info(reconciliationMessage)
-	err = r.prune(ctx, r.meshGeneration)
+	err = r.prune(ctx, r.meshGeneration, true)
 	if err != nil {
 		reconciliationReason = status.ConditionReasonReconcileError
 		reconciliationMessage = "Error pruning obsolete resources"
@@ -446,7 +454,7 @@ func (r *controlPlaneInstanceReconciler) postReconciliationStatus(ctx context.Co
 	r.Status.SetCondition(reconciledCondition)
 
 	// calculate readiness after updating reconciliation status, so we don't mark failed reconcilations as "ready"
-	_, err := r.updateReadinessStatus(ctx)
+	_, err := r.updateReadinessStatus(ctx, r.controlPlaneSecondaryKubeClient)
 	if err != nil {
 		return err
 	}

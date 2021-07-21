@@ -3,13 +3,11 @@ package controlplane
 import (
 	"context"
 	"fmt"
-
+	"github.com/maistra/istio-operator/pkg/controller/common"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
-
-	"github.com/maistra/istio-operator/pkg/controller/common"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -86,24 +84,43 @@ var (
 	}
 )
 
-func (r *controlPlaneInstanceReconciler) prune(ctx context.Context, generation string) error {
+func (r *controlPlaneInstanceReconciler) prune(ctx context.Context, generation string, isExternalProfileActive bool) error {
 	allErrors := []error{}
-	err := r.pruneResources(ctx, namespacedResources, generation, r.Instance.Namespace)
+
+	// LOCAL STUFF
+	err := r.pruneResources(ctx, namespacedResources, generation, r.Instance.Namespace, r.Client)
 	if err != nil {
 		allErrors = append(allErrors, err)
 	}
-	err = r.pruneResources(ctx, namespacedResources, generation, r.OperatorNamespace)
+	err = r.pruneResources(ctx, namespacedResources, generation, r.OperatorNamespace, r.Client)
 	if err != nil {
 		allErrors = append(allErrors, err)
 	}
-	err = r.pruneResources(ctx, nonNamespacedResources, generation, "")
+	err = r.pruneResources(ctx, nonNamespacedResources, generation, "", r.Client)
 	if err != nil {
 		allErrors = append(allErrors, err)
 	}
+
+	if isExternalProfileActive {
+		// EXTERNAL STUFF
+		err := r.pruneResources(ctx, namespacedResources, generation, r.Instance.Namespace, r.controlPlaneSecondaryKubeClient)
+		if err != nil {
+			allErrors = append(allErrors, err)
+		}
+		err = r.pruneResources(ctx, namespacedResources, generation, r.OperatorNamespace, r.controlPlaneSecondaryKubeClient)
+		if err != nil {
+			allErrors = append(allErrors, err)
+		}
+		err = r.pruneResources(ctx, nonNamespacedResources, generation, "", r.controlPlaneSecondaryKubeClient)
+		if err != nil {
+			allErrors = append(allErrors, err)
+		}
+	}
+
 	return utilerrors.NewAggregate(allErrors)
 }
 
-func (r *controlPlaneInstanceReconciler) pruneResources(ctx context.Context, gvks map[schema.GroupVersionKind]pruneConfig, instanceGeneration string, namespace string) error {
+func (r *controlPlaneInstanceReconciler) pruneResources(ctx context.Context, gvks map[schema.GroupVersionKind]pruneConfig, instanceGeneration string, namespace string, cl client.Client) error {
 	log := common.LogFromContext(ctx)
 
 	allErrors := []error{}
@@ -111,9 +128,9 @@ func (r *controlPlaneInstanceReconciler) pruneResources(ctx context.Context, gvk
 		log.Info("pruning resources", "type", gvk.String())
 		var err error
 		if pruneConfig.supportsDeleteCollection {
-			err = r.pruneAll(ctx, gvk, instanceGeneration, namespace)
+			err = r.pruneAll(ctx, gvk, instanceGeneration, namespace, cl)
 		} else {
-			err = r.pruneIndividually(ctx, gvk, instanceGeneration, namespace)
+			err = r.pruneIndividually(ctx, gvk, instanceGeneration, namespace, cl)
 		}
 		if err != nil {
 			log.Error(err, "Error pruning resources", "type", gvk.String())
@@ -123,11 +140,11 @@ func (r *controlPlaneInstanceReconciler) pruneResources(ctx context.Context, gvk
 	return utilerrors.NewAggregate(allErrors)
 }
 
-func (r *controlPlaneInstanceReconciler) pruneIndividually(ctx context.Context, gvk schema.GroupVersionKind, instanceGeneration string, namespace string) error {
+func (r *controlPlaneInstanceReconciler) pruneIndividually(ctx context.Context, gvk schema.GroupVersionKind, instanceGeneration string, namespace string, cl client.Client) error {
 	labelSelector := map[string]string{common.OwnerKey: r.Instance.Namespace}
 	objects := &unstructured.UnstructuredList{}
 	objects.SetGroupVersionKind(gvk)
-	err := r.Client.List(ctx, objects, client.InNamespace(namespace), client.MatchingLabels(labelSelector))
+	err := cl.List(ctx, objects, client.InNamespace(namespace), client.MatchingLabels(labelSelector))
 	if err != nil {
 		if meta.IsNoMatchError(err) || errors.IsNotFound(err) {
 			return nil
@@ -136,7 +153,7 @@ func (r *controlPlaneInstanceReconciler) pruneIndividually(ctx context.Context, 
 	}
 	for _, object := range objects.Items {
 		if generation, ok := common.GetAnnotation(&object, common.MeshGenerationKey); ok && generation != instanceGeneration {
-			err = r.Client.Delete(ctx, &object, client.PropagationPolicy(metav1.DeletePropagationBackground))
+			err = cl.Delete(ctx, &object, client.PropagationPolicy(metav1.DeletePropagationBackground))
 			if err != nil && !errors.IsNotFound(err) {
 				return fmt.Errorf("Error deleting resource: %v", err)
 			}
@@ -145,7 +162,7 @@ func (r *controlPlaneInstanceReconciler) pruneIndividually(ctx context.Context, 
 	return nil
 }
 
-func (r *controlPlaneInstanceReconciler) pruneAll(ctx context.Context, gvk schema.GroupVersionKind, instanceGeneration string, namespace string) error {
+func (r *controlPlaneInstanceReconciler) pruneAll(ctx context.Context, gvk schema.GroupVersionKind, instanceGeneration string, namespace string, cl client.Client) error {
 	ownerRequirement, err := labels.NewRequirement(common.OwnerKey, selection.Equals, []string{r.Instance.Namespace})
 	if err != nil {
 		return err
@@ -158,7 +175,7 @@ func (r *controlPlaneInstanceReconciler) pruneAll(ctx context.Context, gvk schem
 
 	object := &unstructured.Unstructured{}
 	object.SetGroupVersionKind(gvk)
-	err = r.Client.DeleteAllOf(ctx,
+	err = cl.DeleteAllOf(ctx,
 		object,
 		client.InNamespace(namespace),
 		client.MatchingLabelsSelector{Selector: selector},

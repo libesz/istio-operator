@@ -4,15 +4,14 @@ import (
 	"context"
 	"fmt"
 
-	errors "github.com/pkg/errors"
-	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/util/sets"
-
 	"github.com/maistra/istio-operator/pkg/apis/maistra/status"
 	maistrav2 "github.com/maistra/istio-operator/pkg/apis/maistra/v2"
 	"github.com/maistra/istio-operator/pkg/controller/common"
 	"github.com/maistra/istio-operator/pkg/controller/hacks"
+	errors "github.com/pkg/errors"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/util/sets"
 )
 
 func (r *controlPlaneInstanceReconciler) Delete(ctx context.Context) error {
@@ -37,11 +36,9 @@ func (r *controlPlaneInstanceReconciler) Delete(ctx context.Context) error {
 		return err // return regardless of error; deletion will continue when update event comes back into the operator
 	}
 
-	log.Info("Deleting ServiceMeshControlPlane")
-
 	// delete resources owned by the SMCP
 	r.EventRecorder.Event(r.Instance, corev1.EventTypeNormal, eventReasonDeleting, "Deleting service mesh")
-	err := r.prune(ctx, "")
+	err := r.prune(ctx, "", true)
 	if err == nil {
 		r.EventRecorder.Event(r.Instance, corev1.EventTypeNormal, eventReasonDeleted, "Successfully deleted service mesh resources")
 	} else {

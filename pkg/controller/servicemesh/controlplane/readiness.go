@@ -22,7 +22,7 @@ const statusAnnotationAlwaysReadyComponents = "alwaysReadyComponents"
 
 func (r *controlPlaneInstanceReconciler) UpdateReadiness(ctx context.Context) error {
 	log := common.LogFromContext(ctx)
-	update, err := r.updateReadinessStatus(ctx)
+	update, err := r.updateReadinessStatus(ctx, r.controlPlaneSecondaryKubeClient)
 	if update {
 		statusErr := r.PostStatus(ctx)
 		if statusErr != nil {
@@ -38,10 +38,10 @@ func (r *controlPlaneInstanceReconciler) UpdateReadiness(ctx context.Context) er
 	return err
 }
 
-func (r *controlPlaneInstanceReconciler) updateReadinessStatus(ctx context.Context) (bool, error) {
+func (r *controlPlaneInstanceReconciler) updateReadinessStatus(ctx context.Context, cl client.Client) (bool, error) {
 	log := common.LogFromContext(ctx)
 	log.Info("Updating ServiceMeshControlPlane readiness state")
-	readyComponents, unreadyComponents, err := r.calculateComponentReadiness(ctx)
+	readyComponents, unreadyComponents, err := r.calculateComponentReadiness(ctx, cl)
 	if err != nil {
 		condition := status.Condition{
 			Type:    status.ConditionTypeReady,
@@ -119,12 +119,12 @@ func (r *controlPlaneInstanceReconciler) hasReadiness(kind string) bool {
 	return kindsWithReadiness.Has(kind)
 }
 
-func (r *controlPlaneInstanceReconciler) calculateComponentReadiness(ctx context.Context) (readyComponents, unreadyComponents sets.String, err error) {
+func (r *controlPlaneInstanceReconciler) calculateComponentReadiness(ctx context.Context, cl client.Client) (readyComponents, unreadyComponents sets.String, err error) {
 	readyComponents = sets.NewString()
 	unreadyComponents = sets.NewString()
 
 	var readinessMap map[string]bool
-	readinessMap, err = r.calculateComponentReadinessMap(ctx)
+	readinessMap, err = r.calculateComponentReadinessMap(ctx, cl)
 	if err != nil {
 		return
 	}
@@ -138,7 +138,7 @@ func (r *controlPlaneInstanceReconciler) calculateComponentReadiness(ctx context
 	return
 }
 
-func (r *controlPlaneInstanceReconciler) calculateComponentReadinessMap(ctx context.Context) (map[string]bool, error) {
+func (r *controlPlaneInstanceReconciler) calculateComponentReadinessMap(ctx context.Context, cl client.Client) (map[string]bool, error) {
 	readinessMap := map[string]bool{}
 	typesToCheck := []struct {
 		list  runtime.Object
@@ -176,7 +176,7 @@ func (r *controlPlaneInstanceReconciler) calculateComponentReadinessMap(ctx cont
 		},
 	}
 	for _, check := range typesToCheck {
-		err := r.calculateReadinessForType(ctx, check.list, check.ready, readinessMap)
+		err := r.calculateReadinessForType(ctx, cl, check.list, check.ready, readinessMap)
 		if err != nil {
 			return readinessMap, err
 		}
@@ -209,12 +209,12 @@ func (r *controlPlaneInstanceReconciler) isCNIReady(ctx context.Context) (bool, 
 	return true, nil
 }
 
-func (r *controlPlaneInstanceReconciler) calculateReadinessForType(ctx context.Context, list runtime.Object, isReady isReadyFunc, readinessMap map[string]bool) error {
+func (r *controlPlaneInstanceReconciler) calculateReadinessForType(ctx context.Context, cl client.Client, list runtime.Object, isReady isReadyFunc, readinessMap map[string]bool) error {
 	log := common.LogFromContext(ctx)
 
 	meshNamespace := r.Instance.GetNamespace()
 	selector := map[string]string{common.OwnerKey: meshNamespace}
-	err := r.Client.List(ctx, list, client.InNamespace(meshNamespace), client.MatchingLabels(selector))
+	err := cl.List(ctx, list, client.InNamespace(meshNamespace), client.MatchingLabels(selector))
 	if err != nil {
 		return err
 	}

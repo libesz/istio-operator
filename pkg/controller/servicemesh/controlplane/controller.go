@@ -2,7 +2,15 @@ package controlplane
 
 import (
 	"context"
+	"fmt"
+	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/tools/clientcmd"
 	"sync"
+	"time"
 
 	"github.com/go-logr/logr"
 	"k8s.io/client-go/tools/record"
@@ -42,20 +50,35 @@ func Add(mgr manager.Manager) error {
 		return err
 	}
 
-	reconciler := newReconciler(mgr.GetClient(), mgr.GetScheme(), mgr.GetEventRecorderFor(controllerName), operatorNamespace, cniConfig)
+	// TODO: Change kubeconfigPath from fixed value to configurable solution
+	secondaryKubeConfig, err := clientcmd.BuildConfigFromFlags("", "/etc/kubeconfigs/secondary.yaml")
+	if err != nil {
+		return err
+	}
+	secondaryKubeConfig.Burst = common.Config.Controller.APIBurst * 2
+	secondaryKubeConfig.QPS = common.Config.Controller.APIQPS * 2
+
+	secondaryKubeClient, err := client.New(secondaryKubeConfig, client.Options{})
+	if err != nil {
+		return err
+	}
+
+	reconciler := newReconciler(mgr.GetClient(), mgr.GetScheme(), mgr.GetEventRecorderFor(controllerName), operatorNamespace, cniConfig, secondaryKubeConfig, secondaryKubeClient)
 	return add(mgr, reconciler)
 }
 
 // newReconciler returns a new reconcile.Reconciler
-func newReconciler(cl client.Client, scheme *runtime.Scheme, eventRecorder record.EventRecorder, operatorNamespace string, cniConfig cni.Config) *ControlPlaneReconciler {
+func newReconciler(client client.Client, scheme *runtime.Scheme, eventRecorder record.EventRecorder, operatorNamespace string, cniConfig cni.Config, secondaryKubeConfig *rest.Config, secondaryClient client.Client) *ControlPlaneReconciler {
 	reconciler := &ControlPlaneReconciler{
 		ControllerResources: common.ControllerResources{
-			Client:            cl,
+			Client:            client,
 			Scheme:            scheme,
 			EventRecorder:     eventRecorder,
 			OperatorNamespace: operatorNamespace,
 		},
 		cniConfig:   cniConfig,
+		secondaryKubeConfig: secondaryKubeConfig,
+		secondaryKubeClient: secondaryClient,
 		reconcilers: map[types.NamespacedName]ControlPlaneInstanceReconciler{},
 	}
 	reconciler.instanceReconcilerFactory = NewControlPlaneInstanceReconciler
@@ -89,6 +112,7 @@ func add(mgr manager.Manager, r *ControlPlaneReconciler) error {
 		ownedResourcePredicates); err != nil {
 		return err
 	}
+
 	if err = c.Watch(&source.Kind{Type: &appsv1.StatefulSet{}},
 		&handler.EnqueueRequestForOwner{
 			IsController: true,
@@ -97,6 +121,7 @@ func add(mgr manager.Manager, r *ControlPlaneReconciler) error {
 		ownedResourcePredicates); err != nil {
 		return err
 	}
+
 	if err = c.Watch(&source.Kind{Type: &appsv1.DaemonSet{}},
 		&handler.EnqueueRequestForOwner{
 			IsController: true,
@@ -105,6 +130,8 @@ func add(mgr manager.Manager, r *ControlPlaneReconciler) error {
 		ownedResourcePredicates); err != nil {
 		return err
 	}
+
+	watchExternalObjects(ctx, r)
 
 	// add watch for cni daemon set
 	operatorNamespace := common.GetOperatorNamespace()
@@ -135,6 +162,47 @@ func add(mgr manager.Manager, r *ControlPlaneReconciler) error {
 	return nil
 }
 
+// TODO: This is a PoC code with fixed values
+func watchExternalObjects(ctx context.Context, reconciler *ControlPlaneReconciler) {
+	log := common.LogFromContext(ctx)
+
+	clientset, err := kubernetes.NewForConfig(reconciler.secondaryKubeConfig)
+	if err != nil {
+		log.Info(fmt.Sprintf("Error while creating external watch clientset: %s", err))
+	}
+
+	optionsModifer := func(options *metav1.ListOptions) {
+		options.LabelSelector = "maistra.io/owner=external-istiod"
+	}
+
+	watchlist := cache.NewFilteredListWatchFromClient(clientset.AppsV1().RESTClient(), "deployments", v1.NamespaceAll, optionsModifer)
+	_, controller := cache.NewInformer(
+		watchlist,
+		&appsv1.Deployment{},
+		time.Second * 0,
+		cache.ResourceEventHandlerFuncs{
+			AddFunc: func(obj interface{}) {
+				log.Info(fmt.Sprintf("XXX EXTERNAL deployment added: %s \n", obj))
+			},
+			DeleteFunc: func(obj interface{}) {
+				log.Info(fmt.Sprintf("XXX EXTERNAL deployment deleted: %s \n", obj))
+			},
+			UpdateFunc:func(oldObj, newObj interface{}) {
+				log.Info(fmt.Sprintf("XXX EXTERNAL deployment changed \n"))
+				for _ , rec := range reconciler.reconcilers {
+					_, err = rec.Reconcile(ctx)
+					if err != nil {
+						return
+					}
+				}
+			},
+		},
+	)
+
+	stop := make(chan struct{})
+	go controller.Run(stop)
+}
+
 var ownedResourcePredicates = predicate.Funcs{
 	CreateFunc: func(_ event.CreateEvent) bool {
 		// we don't need to update status on create events
@@ -155,11 +223,13 @@ type ControlPlaneReconciler struct {
 	// that reads objects from the cache and writes to the apiserver
 	common.ControllerResources
 	cniConfig cni.Config
+	secondaryKubeConfig *rest.Config
+	secondaryKubeClient client.Client
 
 	reconcilers map[types.NamespacedName]ControlPlaneInstanceReconciler
 	mu          sync.Mutex
 
-	instanceReconcilerFactory func(common.ControllerResources, *v2.ServiceMeshControlPlane, cni.Config) ControlPlaneInstanceReconciler
+	instanceReconcilerFactory       func(common.ControllerResources, client.Client, *v2.ServiceMeshControlPlane, cni.Config) ControlPlaneInstanceReconciler
 }
 
 // ControlPlaneInstanceReconciler reconciles a specific instance of a ServiceMeshControlPlane
@@ -198,7 +268,7 @@ func (r *ControlPlaneReconciler) Reconcile(request reconcile.Request) (reconcile
 		return reconcile.Result{}, err
 	}
 
-	key, reconciler := r.getOrCreateReconciler(instance)
+	key, reconciler := r.getOrCreateReconciler(instance, r.secondaryKubeClient)
 	defer r.deleteReconcilerIfFinished(key, reconciler)
 
 	deleted := instance.GetDeletionTimestamp() != nil
@@ -235,7 +305,7 @@ func isFullyReconciled(instance *v2.ServiceMeshControlPlane) bool {
 		instance.Status.GetCondition(status.ConditionTypeReconciled).Status == status.ConditionStatusTrue
 }
 
-func (r *ControlPlaneReconciler) getOrCreateReconciler(newInstance *v2.ServiceMeshControlPlane) (types.NamespacedName, ControlPlaneInstanceReconciler) {
+func (r *ControlPlaneReconciler) getOrCreateReconciler(newInstance *v2.ServiceMeshControlPlane, cpCl client.Client) (types.NamespacedName, ControlPlaneInstanceReconciler) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -244,7 +314,8 @@ func (r *ControlPlaneReconciler) getOrCreateReconciler(newInstance *v2.ServiceMe
 		reconciler.SetInstance(newInstance)
 		return key, reconciler
 	}
-	newReconciler := r.instanceReconcilerFactory(r.ControllerResources, newInstance, r.cniConfig)
+
+	newReconciler := r.instanceReconcilerFactory(r.ControllerResources, cpCl, newInstance, r.cniConfig)
 	r.reconcilers[key] = newReconciler
 	return key, newReconciler
 }

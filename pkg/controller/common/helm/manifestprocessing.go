@@ -145,7 +145,12 @@ func (p *ManifestProcessor) processObject(ctx context.Context, obj *unstructured
 	if err != nil {
 		if errors.IsNotFound(err) {
 			log.Info("creating resource")
+			if component == "istio-discovery" || component == "telemetry-common" {
+				obj.SetResourceVersion("")
+				obj.SetOwnerReferences(nil)
+			}
 			err = p.Client.Create(ctx, obj)
+			log.Info("XXX object is created")
 			if err == nil {
 				// special handling
 				if err := p.processNewObject(ctx, obj); err != nil {

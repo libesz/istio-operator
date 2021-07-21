@@ -2,12 +2,11 @@ package controlplane
 
 import (
 	"context"
-
 	"github.com/maistra/istio-operator/pkg/controller/common"
 	"github.com/maistra/istio-operator/pkg/controller/common/helm"
 )
 
-func (r *controlPlaneInstanceReconciler) processComponentManifests(ctx context.Context, chartName string) (hasReadiness bool, err error) {
+func (r *controlPlaneInstanceReconciler) processComponentManifests(ctx context.Context, chartName string, isExternalProfileActive bool) (hasReadiness bool, err error) {
 	componentName := componentFromChartName(chartName)
 	log := common.LogFromContext(ctx).WithValues("Component", componentName)
 	ctx = common.NewContextWithLog(ctx, log)
@@ -25,7 +24,20 @@ func (r *controlPlaneInstanceReconciler) processComponentManifests(ctx context.C
 		log.Info("component reconciliation complete")
 	}()
 
-	mp := helm.NewManifestProcessor(r.ControllerResources, helm.NewPatchFactory(r.Client), r.Instance.GetNamespace(), r.meshGeneration, r.Instance.GetNamespace(), r.preprocessObject, r.processNewObject)
+	tmpCR := r.ControllerResources
+	tmpCR.Client = r.controlPlaneSecondaryKubeClient
+
+	var mp *helm.ManifestProcessor
+
+	if isExternalProfileActive {
+		if chartName == "telemetry-common" || chartName == "istio-discovery" {
+			mp = helm.NewManifestProcessor(tmpCR, helm.NewPatchFactory(r.controlPlaneSecondaryKubeClient), r.Instance.GetNamespace(), r.meshGeneration, r.Instance.GetNamespace(), r.preprocessObject, r.processNewObject)
+		}
+	} else {
+		mp = helm.NewManifestProcessor(r.ControllerResources, helm.NewPatchFactory(r.Client), r.Instance.GetNamespace(), r.meshGeneration, r.Instance.GetNamespace(), r.preprocessObject, r.processNewObject)
+	}
+
+	log.Info("XXX new Manifest Processor has been created, started manifest processing")
 	if err = mp.ProcessManifests(ctx, renderings, status.Resource); err != nil {
 		return false, err
 	}
